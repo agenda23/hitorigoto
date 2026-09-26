@@ -1,0 +1,83 @@
+@import "tailwindcss";
+@source "../node_modules/streamdown/dist/*.js";
+
+/* Theme tokens use shadcn names so Streamdown's built-in classes pick them up. */
+:root {
+  color-scheme: light dark;
+  --background: #faf9f5;
+  --foreground: #1f1e1d;
+  --muted: #f0eee6;
+  --muted-foreground: #73726c;
+  --border: #e6e3d8;
+  --sidebar: #f3f1ea;
+  --primary: #c96442;
+  --primary-foreground: #ffffff;
+  --user-bubble: #efece2;
+  --danger: #b3382c;
+  --shadow: 0 2px 12px rgb(31 30 29 / 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #262624;
+    --foreground: #f5f4ee;
+    --muted: #30302e;
+    --muted-foreground: #a3a29a;
+    --border: #3d3c38;
+    --sidebar: #1f1e1d;
+    --primary: #d97757;
+    --primary-foreground: #1f1e1d;
+    --user-bubble: #34332f;
+    --danger: #ef7c6e;
+    --shadow: 0 2px 16px rgb(0 0 0 / 0.35);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-border: var(--border);
+  --color-sidebar: var(--sidebar);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-user-bubble: var(--user-bubble);
+  --color-danger: var(--danger);
+  --shadow-soft: var(--shadow);
+  /* System fonts only: external fonts are forbidden by the CSP. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  --font-serif: ui-serif, Georgia, "Hiragino Mincho ProN", "Yu Mincho", serif;
+}
+
+/* Base layer, so Tailwind utilities (e.g. outline-none on the composer) can override these. */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}
