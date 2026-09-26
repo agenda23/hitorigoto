@@ -28,6 +28,17 @@ const IMAGE_ONLY_HISTORY: Record<Lang, string> = { ja: '（画像を添付）', 
 export const COMPRESS_THRESHOLD = 0.8
 /** How many of the latest messages stay verbatim; the smaller value is the last resort. */
 export const KEEP_MESSAGES = [4, 2]
+/**
+ * The verbatim tail may also take at most this share of the context window (in estimated tokens),
+ * matching `KEEP_MESSAGES`: a few very long messages would otherwise leave the rebuilt session
+ * still nearly full and force another round of slow summarizing. At least the last two messages
+ * (the latest turn) are always kept.
+ */
+export const TAIL_BUDGET = [0.4, 0.2]
+const FALLBACK_WINDOW = 9216
+
+/** Rough token estimate, deliberately on the high side (Japanese runs about 0.65 tokens per character). */
+const estimateTokens = (text: string) => Math.ceil(text.length * 0.75)
 
 export type SessionState = { phase: 'idle' | 'summarizing'; used: number; quota: number; /** Why the last run failed, for display. */ error: string | null }
 
@@ -49,6 +60,10 @@ const toPrompts = (messages: readonly ThreadMessage[], lang: Lang): LMMessage[] 
 
 const describeError = (e: unknown) => (e instanceof Error || (typeof e === 'object' && e !== null && 'name' in e) ? `${(e as Error).name}: ${(e as Error).message}` : String(e))
 
+/** Context usage / size, under either API generation (`contextUsage`/`contextWindow`, or `inputUsage`/`inputQuota`). */
+const usageOf = (s: LMSession) => s.contextUsage ?? s.inputUsage ?? 0
+const quotaOf = (s: LMSession) => s.contextWindow ?? s.inputQuota ?? 0
+
 const isQuotaError = (e: unknown) => typeof e === 'object' && e !== null && (e as { name?: string }).name === 'QuotaExceededError'
 
 type Cached = { session: LMSession; consumed: number }
@@ -65,6 +80,8 @@ type Cached = { session: LMSession; consumed: number }
 export class NanoSessions {
   private cached: Cached | null = null
   private generation = 0
+  /** The model reported a context overflow: it dropped early messages, so rebuild from our own list. */
+  private overflowed = false
   /** Covers every message up to and including `upToId`. Valid only while that message is still in the history. */
   private summary: { text: string; upToId: string } | null = null
   private state: SessionState = { phase: 'idle', used: 0, quota: 0, error: null }
@@ -88,11 +105,12 @@ export class NanoSessions {
   }
 
   private report(session: LMSession) {
-    this.setState({ used: session.inputUsage ?? 0, quota: session.inputQuota ?? 0 })
+    this.setState({ used: usageOf(session), quota: quotaOf(session) })
   }
 
   private ratio(session: LMSession) {
-    return session.inputQuota ? (session.inputUsage ?? 0) / session.inputQuota : 0
+    const quota = quotaOf(session)
+    return quota ? usageOf(session) / quota : 0
   }
 
   setLang(lang: Lang) {
@@ -121,6 +139,9 @@ export class NanoSessions {
     const recent = this.recentAfterSummary(history)
     const system = this.summary ? `${SYSTEM_PROMPT[this.lang]}\n\n${SUMMARY_INTRO[this.lang]}\n${this.summary.text}` : SYSTEM_PROMPT[this.lang]
     const session = await this.create({ initialPrompts: [{ role: 'system', content: system }, ...toPrompts(recent, this.lang)], signal })
+    session.oncontextoverflow = () => {
+      this.overflowed = true
+    }
     this.report(session)
     return { session, consumed: history.length }
   }
@@ -145,12 +166,11 @@ export class NanoSessions {
   /** Summarizes older turns, then rebuilds the session from "summary + recent messages". */
   private async compress(history: readonly ThreadMessage[], signal?: AbortSignal): Promise<Cached> {
     this.destroy()
+    this.overflowed = false
     this.setState({ phase: 'summarizing' })
     try {
       for (let k = 0; k < KEEP_MESSAGES.length; k++) {
-        // Keep the newest messages verbatim, starting the verbatim part at a user turn.
-        let cut = history.length - KEEP_MESSAGES[k]
-        while (cut < history.length && history[cut].role !== 'user') cut++
+        const cut = this.tailStart(history, k)
         if (cut <= 0 || cut >= history.length) continue
         const summarizedUpTo = this.summary ? history.findIndex(m => m.id === this.summary!.upToId) + 1 : 0
         if (cut > summarizedUpTo) {
@@ -167,12 +187,22 @@ export class NanoSessions {
     }
   }
 
+  /** Index where the verbatim tail starts: at most KEEP_MESSAGES[k] messages within the token budget, on a user turn. */
+  private tailStart(history: readonly ThreadMessage[], k: number) {
+    const budget = TAIL_BUDGET[k] * (this.state.quota || FALLBACK_WINDOW)
+    const estimate = (from: number) => history.slice(from).reduce((n, m) => n + estimateTokens(textOf(m)), 0)
+    let cut = Math.max(0, history.length - KEEP_MESSAGES[k])
+    while (cut < history.length - 2 && estimate(cut) > budget) cut++
+    while (cut < history.length && history[cut].role !== 'user') cut++
+    return cut
+  }
+
   private async summarize(previous: string, messages: readonly ThreadMessage[], signal?: AbortSignal): Promise<string> {
     const L = LABELS[this.lang]
     const session = await this.create({ initialPrompts: [{ role: 'system', content: SUMMARY_PROMPT[this.lang] }], signal })
     try {
       // Fold the transcript into the summary chunk by chunk so each request fits the context.
-      const budget = Math.max(1500, Math.floor((session.inputQuota ?? 4000) * 0.5))
+      const budget = Math.max(1500, Math.floor((quotaOf(session) || 4000) * 0.5))
       const lines = messages.flatMap(m => ((m.role === 'user' || m.role === 'assistant') && textOf(m) ? [`${m.role === 'user' ? L.user : L.assistant}: ${textOf(m)}`] : []))
       const chunks: string[] = []
       let current = ''
@@ -238,7 +268,7 @@ export class NanoSessions {
           if (!self.cached || self.cached.consumed !== history.length) {
             self.destroy()
             self.cached = await self.buildFitting(history, abortSignal)
-          } else if (self.ratio(self.cached.session) > COMPRESS_THRESHOLD && history.length > smallest) {
+          } else if ((self.overflowed || self.ratio(self.cached.session) > COMPRESS_THRESHOLD) && history.length > smallest) {
             self.cached = await self.compress(history, abortSignal)
           }
         } catch (e) {

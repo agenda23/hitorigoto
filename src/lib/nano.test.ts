@@ -17,17 +17,25 @@ async function run(sessions: NanoSessions, messages: ThreadMessage[], signal = n
   return last
 }
 
+type ApiStyle = 'input' | 'context'
+
 class FakeSession implements LMSession {
-  inputUsage: number
-  inputQuota = 1000
+  usage: number
+  quota = 1000
   destroyed = false
   prompts: (string | LMMessage[])[] = []
+  oncontextoverflow: ((e: Event) => void) | null = null
   constructor(
     public options: LMCreateOptions,
     usage: number,
     private reply: (s: FakeSession, input: string | LMMessage[]) => string | Error | DOMException,
+    style: ApiStyle = 'input',
   ) {
-    this.inputUsage = usage * 1000
+    this.usage = usage * 1000
+    // Chrome 148-ish: inputUsage / inputQuota. Chrome 154+: contextUsage / contextWindow.
+    const [u, q] = style === 'input' ? ['inputUsage', 'inputQuota'] : ['contextUsage', 'contextWindow']
+    Object.defineProperty(this, u, { get: () => this.usage, enumerable: true })
+    Object.defineProperty(this, q, { get: () => this.quota, enumerable: true })
   }
   get isSummarizer() {
     return Object.values(SUMMARY_PROMPT).includes(this.options.initialPrompts?.[0]?.content as string)
@@ -51,11 +59,11 @@ class FakeSession implements LMSession {
   }
 }
 
-function installModel(opts: { usage?: (o: LMCreateOptions) => number; reply?: (s: FakeSession, input: string | LMMessage[]) => string | Error | DOMException } = {}) {
+function installModel(opts: { usage?: (o: LMCreateOptions) => number; reply?: (s: FakeSession, input: string | LMMessage[]) => string | Error | DOMException; style?: ApiStyle } = {}) {
   const sessions: FakeSession[] = []
   vi.stubGlobal('LanguageModel', {
     create: async (o: LMCreateOptions) => {
-      const s = new FakeSession(o, opts.usage?.(o) ?? 0.1, opts.reply ?? (s => (s.isSummarizer ? 'SUMMARY TEXT' : 'ok')))
+      const s = new FakeSession(o, opts.usage?.(o) ?? 0.1, opts.reply ?? (s => (s.isSummarizer ? 'SUMMARY TEXT' : 'ok')), opts.style)
       sessions.push(s)
       return s
     },
@@ -123,7 +131,7 @@ describe('context summarization', () => {
       usage: o => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.5),
       reply: (s, input) => {
         if (s.isSummarizer) return 'SUMMARY TEXT'
-        s.inputUsage = 900 // every answer pushes the context over the threshold
+        s.usage = 900 // every answer pushes the context over the threshold
         return `answer to ${String(input)}`
       },
     })
@@ -139,6 +147,20 @@ describe('context summarization', () => {
     expect(final.options.initialPrompts!.slice(1).map(p => p.content)).toEqual(['q2', 'answer to q2'])
     expect(final.prompts).toEqual(['q3'])
   })
+
+  it('shrinks the verbatim tail when the latest messages are very long, so one summary is enough', async () => {
+    // quota 1000, budget 0.4 => 400 estimated tokens; each long message is ~600.
+    const long = 'あ'.repeat(800)
+    const big = [msg('u1', 'user', 'early'), msg('a1', 'assistant', 'early answer'), msg('u2', 'user', long), msg('a2', 'assistant', long), msg('u3', 'user', long), msg('a3', 'assistant', long), msg('u4', 'user', 'new question')]
+    const m = installModel({ usage: o => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.9) })
+    const s = new NanoSessions('ja')
+    await run(s, big)
+    expect(m.summarizers()).toHaveLength(1)
+    // Only the latest turn (u3, a3) stays verbatim, although four messages would be allowed.
+    const final = m.chats().at(-1)!
+    expect(final.options.initialPrompts!.slice(1).map(p => p.content)).toEqual([long, long])
+  })
+
 
   it('folds a long transcript into the summary chunk by chunk', async () => {
     const m = installModel({ usage: o => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.9) })
@@ -182,6 +204,45 @@ describe('context summarization', () => {
     // English rebuild starts from the full history again (and summarizes again with the English prompt).
     expect(JSON.stringify(m.chats().at(-1)!.options.initialPrompts)).toContain('SUMMARY TEXT')
     expect(m.summarizers().at(-1)!.options.initialPrompts![0].content).not.toBe(SUMMARY_PROMPT.ja)
+  })
+})
+
+describe('Chrome 154+ API names (contextUsage / contextWindow / oncontextoverflow)', () => {
+  const history = [...conversation(3), msg('u4', 'user', 'new question')]
+  const summaryAware = (o: LMCreateOptions) => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.9)
+
+  it('reports usage for the gauge', async () => {
+    installModel({ style: 'context', usage: () => 0.4 })
+    const s = new NanoSessions('ja')
+    await run(s, [msg('u1', 'user', 'hi')])
+    expect(s.getState()).toEqual({ phase: 'idle', used: 400, quota: 1000, error: null })
+  })
+
+  it('summarizes when the context is nearly full', async () => {
+    const m = installModel({ style: 'context', usage: summaryAware })
+    const s = new NanoSessions('ja')
+    await run(s, history)
+    expect(m.summarizers()).toHaveLength(1)
+    expect(m.chats().at(-1)!.options.initialPrompts![0].content).toContain('SUMMARY TEXT')
+  })
+
+  it('rebuilds with a summary after the model reports an overflow (it drops early messages silently)', async () => {
+    const m = installModel({
+      style: 'context',
+      usage: o => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.5),
+      reply: (s, input) => {
+        if (s.isSummarizer) return 'SUMMARY TEXT'
+        if (input === 'q2') s.oncontextoverflow?.(new Event('contextoverflow')) // usage stays low: only the event says so
+        return 'answer'
+      },
+    })
+    const s = new NanoSessions('ja')
+    await run(s, [msg('u1', 'user', 'q1')])
+    await run(s, [msg('u1', 'user', 'q1'), msg('a1', 'assistant', 'answer'), msg('u2', 'user', 'q2')])
+    expect(m.summarizers()).toHaveLength(0)
+    await run(s, [msg('u1', 'user', 'q1'), msg('a1', 'assistant', 'answer'), msg('u2', 'user', 'q2'), msg('a2', 'assistant', 'answer'), msg('u3', 'user', 'q3')])
+    expect(m.summarizers()).toHaveLength(1)
+    expect(m.chats().at(-1)!.options.initialPrompts![0].content).toContain('SUMMARY TEXT')
   })
 })
 

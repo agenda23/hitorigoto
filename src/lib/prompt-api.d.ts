@@ -20,6 +20,12 @@ interface LMCreateOptions {
 }
 
 interface LMSession {
+  /** Current API (Chrome 154+): how much of the context window is used. */
+  readonly contextUsage?: number
+  readonly contextWindow?: number
+  /** Fires when the context overflowed and the oldest prompts were dropped to make room. */
+  oncontextoverflow?: ((event: Event) => void) | null
+  /** Earlier API names (Chrome 148-ish); kept so both generations work. */
   readonly inputUsage?: number
   readonly inputQuota?: number
   promptStreaming(input: string | LMMessage[], options?: { signal?: AbortSignal }): ReadableStream<string>

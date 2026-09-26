@@ -39,8 +39,8 @@ const MOCK_LANGUAGE_MODEL = `
     create: async o => {
       window.__creates.push({ t: o && o.temperature, k: o && o.topK })
       return {
-        inputUsage: 250,
-        inputQuota: 1000,
+        contextUsage: 250,
+        contextWindow: 1000,
         promptStreaming: input => {
           window.__prompts.push(Array.isArray(input)
             ? input.map(m => ({ role: m.role, parts: m.content.map(c => ({ type: c.type, isBlob: c.value instanceof Blob, mime: c.value && c.value.type })) }))

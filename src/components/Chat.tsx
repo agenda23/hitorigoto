@@ -21,7 +21,10 @@ import { NanoSessions, type SessionState } from '../lib/nano'
 import { DraftsDialog } from './DraftsDialog'
 import { ArrowUpIcon, ColumnsIcon, CopyIcon, ImageIcon, RefreshIcon, StopIcon } from './icons'
 
-const STALL_MS = 15_000
+// After the first token, 15 s of silence looks like a stall. Before it, the model may just be
+// reading a long input (tens of seconds on-device), so be much more patient.
+const STALL_AFTER_FIRST_TOKEN_MS = 15_000
+const STALL_BEFORE_FIRST_TOKEN_MS = 120_000
 const TITLE_MAX = 40
 
 // Remote images are disabled in addition to the CSP: an LLM-emitted `![](https://…?q=…)`
@@ -148,26 +151,32 @@ function RunStatus({ session }: { session: SessionState }) {
   const textLength = last?.role === 'assistant' ? last.content.reduce((n, p) => n + (p.type === 'text' ? p.text.length : 0), 0) : 0
   const failed = last?.role === 'assistant' && last.status?.type === 'incomplete' && last.status.reason === 'error'
 
-  const startedAt = useRef(0)
-  const lastChange = useRef(0)
+  // State (not refs): when the phase or the text changes, the very next render must already see the
+  // reset, otherwise time spent summarizing briefly counts as "no response" for the next wait.
+  const [startedAt, setStartedAt] = useState(0)
+  const [lastChange, setLastChange] = useState(0)
   const [now, setNow] = useState(0)
   useEffect(() => {
     if (!isRunning) return
-    startedAt.current = lastChange.current = Date.now()
-    setNow(Date.now())
+    const t = Date.now()
+    setStartedAt(t)
+    setLastChange(t)
+    setNow(t)
     const id = setInterval(() => setNow(Date.now()), 500)
     return () => clearInterval(id)
   }, [isRunning])
   useEffect(() => {
-    lastChange.current = Date.now()
+    const t = Date.now()
+    setLastChange(t)
+    setNow(t)
   }, [textLength, session.phase])
 
   const summarizing = isRunning && session.phase === 'summarizing'
   let message = ''
   if (summarizing) message = t.summarizing
   else if (isRunning) {
-    const elapsed = Math.floor((now - startedAt.current) / 1000)
-    if (now - lastChange.current > STALL_MS) message = t.stalled
+    const elapsed = Math.floor((now - startedAt) / 1000)
+    if (now - lastChange > (textLength > 0 ? STALL_AFTER_FIRST_TOKEN_MS : STALL_BEFORE_FIRST_TOKEN_MS)) message = t.stalled
     else if (textLength === 0) message = elapsed >= 3 ? t.thinkingElapsed(elapsed) : t.thinking
   } else if (failed) message = t.runError
 
