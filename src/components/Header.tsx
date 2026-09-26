@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { useI18n, type Lang } from '../lib/i18n'
 import { useGuide } from '../lib/guide-context'
-import { HelpIcon, ShieldIcon, SidebarIcon } from './icons'
+import { ActivityIcon, HelpIcon, ShieldIcon, SidebarIcon } from './icons'
+import { MetricsDialog } from './MetricsDialog'
 import { VerifyDialog } from './VerifyDialog'
 
 export function Header({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const { t, lang, setLang } = useI18n()
   const [verifyOpen, setVerifyOpen] = useState(false)
+  const [metricsOpen, setMetricsOpen] = useState(false)
   const guide = useGuide()
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 px-3">
@@ -43,6 +45,15 @@ export function Header({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
         <ShieldIcon />
         {[t.badgeOnDevice, t.badgeOffline, t.badgeZeroSent].join(' · ')}
       </button>
+      <button
+        type="button"
+        className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
+        aria-label={t.metricsOpen}
+        title={t.metricsOpen}
+        onClick={() => setMetricsOpen(true)}
+      >
+        <ActivityIcon />
+      </button>
       <select
         className="rounded-lg bg-transparent px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/5"
         value={lang}
@@ -53,6 +64,7 @@ export function Header({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
         <option value="en">English</option>
       </select>
       {verifyOpen && <VerifyDialog onClose={() => setVerifyOpen(false)} />}
+      {metricsOpen && <MetricsDialog onClose={() => setMetricsOpen(false)} />}
     </header>
   )
 }

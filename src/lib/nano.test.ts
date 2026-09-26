@@ -1,5 +1,6 @@
 import type { ThreadMessage } from '@assistant-ui/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { MetricsStore } from './metrics'
 import { NanoSessions, SUMMARY_PROMPT } from './nano'
 
 type Att = { content: { type: 'image'; image: string }[] }
@@ -243,6 +244,42 @@ describe('Chrome 154+ API names (contextUsage / contextWindow / oncontextoverflo
     await run(s, [msg('u1', 'user', 'q1'), msg('a1', 'assistant', 'answer'), msg('u2', 'user', 'q2'), msg('a2', 'assistant', 'answer'), msg('u3', 'user', 'q3')])
     expect(m.summarizers()).toHaveLength(1)
     expect(m.chats().at(-1)!.options.initialPrompts![0].content).toContain('SUMMARY TEXT')
+  })
+})
+
+describe('run metrics', () => {
+  it('records timing and usage numbers, never the content', async () => {
+    installModel({ usage: () => 0.25 })
+    const store = new MetricsStore(null)
+    await run(new NanoSessions('ja', false, store), [msg('u1', 'user', 'top secret question')])
+    const [r] = store.runs()
+    expect(r).toMatchObject({ ok: true, chars: 2, images: 0, used: 250, quota: 1000, summarized: false })
+    expect(r.firstTokenMs).not.toBeNull()
+    expect(r.setupMs).toBeGreaterThanOrEqual(0)
+    expect(JSON.stringify(r)).not.toContain('secret')
+  })
+
+  it('flags a run whose setup included summarizing', async () => {
+    installModel({ usage: o => (JSON.stringify(o.initialPrompts).includes('SUMMARY TEXT') ? 0.3 : 0.9) })
+    const store = new MetricsStore(null)
+    await run(new NanoSessions('ja', false, store), [...conversation(3), msg('u4', 'user', 'new question')])
+    expect(store.runs()[0].summarized).toBe(true)
+  })
+
+  it('records a failed run as not ok, with no first token', async () => {
+    installModel({ reply: () => new Error('boom') })
+    const store = new MetricsStore(null)
+    await expect(run(new NanoSessions('ja', false, store), [msg('u1', 'user', 'hi')])).rejects.toThrow('boom')
+    expect(store.runs()[0]).toMatchObject({ ok: false, firstTokenMs: null, chars: 0 })
+  })
+
+  it('does not record a run the user aborted', async () => {
+    installModel({ reply: () => new Error('aborted') })
+    const store = new MetricsStore(null)
+    const ctrl = new AbortController()
+    ctrl.abort()
+    await expect(run(new NanoSessions('ja', false, store), [msg('u1', 'user', 'hi')], ctrl.signal)).rejects.toThrow()
+    expect(store.runs()).toEqual([])
   })
 })
 

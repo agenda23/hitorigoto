@@ -147,6 +147,7 @@ const ja: GuideContent = {
     },
     { heading: 'オフラインで使う', body: 'モデルのダウンロード後は、機内モードでも動きます。Chrome の「インストール」から、アプリとして使うこともできます。' },
     { heading: '送信されないことを確かめる', body: 'ヘッダーの「オンデバイス · オフライン可 · 送信 0」を押すと、確かめ方の手順が開きます。' },
+    { heading: '応答の速さを確かめる', body: 'ヘッダーの波形アイコンから、応答にかかった時間（最初の文字が出るまで、生成の速さなど）を見られます。数字だけを、この端末内に記録しています。' },
   ],
 }
 
@@ -261,6 +262,7 @@ const en: GuideContent = {
     },
     { heading: 'Using it offline', body: 'Once the model is downloaded it works in airplane mode. You can also “Install” it from Chrome and use it like an app.' },
     { heading: 'Verifying that nothing is sent', body: 'Click “On-device · Works offline · 0 sent” in the header to open the steps for checking it yourself.' },
+    { heading: 'Checking response speed', body: 'The wave icon in the header shows how long responses took (time to first text, generation speed and so on). Only numbers are recorded, and only on this device.' },
   ],
 }
 

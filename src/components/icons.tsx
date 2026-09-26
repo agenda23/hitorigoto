@@ -115,3 +115,8 @@ export const HelpIcon = () => (
     <path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01" />
   </Icon>
 )
+export const ActivityIcon = () => (
+  <Icon size={16}>
+    <path d="M3 12h4l3-8 4 16 3-8h4" />
+  </Icon>
+)

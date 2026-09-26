@@ -2,6 +2,7 @@ import type { ChatModelAdapter, ThreadMessage } from '@assistant-ui/react'
 import { sessionOptions } from './diagnostics'
 import type { Lang } from './i18n'
 import { dataUrlToBlob } from './images'
+import { metrics, type MetricsStore } from './metrics'
 
 export const SYSTEM_PROMPT: Record<Lang, string> = {
   ja: 'あなたは親切で簡潔なアシスタントです。日本語で答えてください。',
@@ -87,9 +88,13 @@ export class NanoSessions {
   private state: SessionState = { phase: 'idle', used: 0, quota: 0, error: null }
   private listeners = new Set<() => void>()
 
+  /** How many times older turns were summarized (lets a run tell whether its setup included summarizing). */
+  private summarizations = 0
+
   constructor(
     private lang: Lang,
     private images = false,
+    private metricsStore: MetricsStore = metrics,
   ) {}
 
   // useSyncExternalStore contract
@@ -176,6 +181,7 @@ export class NanoSessions {
         if (cut > summarizedUpTo) {
           const text = await this.summarize(this.summary?.text ?? '', history.slice(summarizedUpTo, cut), signal)
           this.summary = { text, upToId: history[cut - 1].id }
+          this.summarizations++
         }
         const entry = await this.build(history, signal)
         if (this.ratio(entry.session) <= COMPRESS_THRESHOLD || k === KEEP_MESSAGES.length - 1) return entry
@@ -250,6 +256,24 @@ export class NanoSessions {
     this.cached = null
   }
 
+  /** Stores timing numbers for the debug panel (never the content). */
+  private recordRun(r: { tStart: number; tPrompt: number; setupMs: number; summarizationsBefore: number; firstAt: number | null; out: string; images: number; ok: boolean }) {
+    const end = performance.now()
+    const session = this.cached?.session
+    this.metricsStore.add({
+      at: Date.now(),
+      setupMs: Math.round(r.setupMs),
+      summarized: this.summarizations > r.summarizationsBefore,
+      firstTokenMs: r.firstAt === null ? null : Math.round(r.firstAt - r.tPrompt),
+      genMs: r.firstAt === null ? 0 : Math.round(end - r.firstAt),
+      chars: r.out.length,
+      used: session ? usageOf(session) : 0,
+      quota: session ? quotaOf(session) : 0,
+      images: r.images,
+      ok: r.ok,
+    })
+  }
+
   adapter(): ChatModelAdapter {
     const self = this
     const smallest = KEEP_MESSAGES[KEEP_MESSAGES.length - 1]
@@ -264,6 +288,8 @@ export class NanoSessions {
           ? [{ role: 'user', content: [{ type: 'text', value: text }, ...blobs.map(value => ({ type: 'image' as const, value }))] }]
           : text
 
+        const tStart = performance.now()
+        const summarizationsBefore = self.summarizations
         try {
           if (!self.cached || self.cached.consumed !== history.length) {
             self.destroy()
@@ -272,30 +298,43 @@ export class NanoSessions {
             self.cached = await self.compress(history, abortSignal)
           }
         } catch (e) {
-          if (!abortSignal.aborted) self.setState({ error: describeError(e) })
+          if (!abortSignal.aborted) {
+            self.setState({ error: describeError(e) })
+            self.recordRun({ tStart, tPrompt: performance.now(), setupMs: performance.now() - tStart, summarizationsBefore, firstAt: null, out: '', images: blobs.length, ok: false })
+          }
           throw e
         }
+        let setupMs = performance.now() - tStart
 
         for (let attempt = 0; ; attempt++) {
           const entry = self.cached!
+          const tPrompt = performance.now()
+          let firstAt: number | null = null
           let out = ''
           try {
             for await (const chunk of entry.session.promptStreaming(input, { signal: abortSignal })) {
+              firstAt ??= performance.now()
               out += chunk
               yield { content: [{ type: 'text' as const, text: out }] }
             }
             entry.consumed = history.length + 2
             self.report(entry.session)
+            self.recordRun({ tStart, tPrompt, setupMs, summarizationsBefore, firstAt, out, images: blobs.length, ok: true })
             return
           } catch (e) {
             // The context overflowed mid-conversation: summarize and retry once.
             if (attempt === 0 && !abortSignal.aborted && isQuotaError(e) && history.length > smallest) {
+              const tCompress = performance.now()
               self.cached = await self.compress(history, abortSignal)
+              setupMs += performance.now() - tCompress
               continue
             }
             // An aborted or failed prompt leaves the session in an unknown state: rebuild next time.
             self.destroy()
-            if (!abortSignal.aborted) self.setState({ error: describeError(e) })
+            if (!abortSignal.aborted) {
+              self.setState({ error: describeError(e) })
+              self.recordRun({ tStart, tPrompt, setupMs, summarizationsBefore, firstAt, out, images: blobs.length, ok: false })
+            }
             throw e
           }
         }
