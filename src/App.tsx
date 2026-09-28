@@ -6,7 +6,7 @@ import { Sidebar } from './components/Sidebar'
 import { checkImageSupport } from './lib/diagnostics'
 import { download, safeFilename } from './lib/download'
 import { ImportError, exportAll, parseImport, threadToMarkdown } from './lib/exchange'
-import { HistoryQuotaError, imageIdsOf, type HistoryRepository, type ImportStrategy, type StoredImage, type Thread, type ThreadMeta, type Usage } from './lib/history'
+import { HistoryQuotaError, imageIdsOf, type HistoryRepository, type ImportStrategy, type PromptPreset, type StoredImage, type Thread, type ThreadMeta, type Usage } from './lib/history'
 import { GuideProvider } from './lib/guide-context'
 import { HistoryProvider } from './lib/history-context'
 import { openHistory, type OpenedHistory } from './lib/history-open'
@@ -15,7 +15,7 @@ import { blobToDataUrl } from './lib/images'
 
 type Active = { id: string; temporary: boolean; initial: Thread | null; images: Record<string, string> }
 type Toast = { message: string; undo?: () => void }
-type PendingImport = { threads: Thread[]; images: StoredImage[]; conflicts: number }
+type PendingImport = { threads: Thread[]; images: StoredImage[]; presets: PromptPreset[]; globalInstruction: string; conflicts: number }
 
 const fresh = (temporary: boolean): Active => ({ id: crypto.randomUUID(), temporary, initial: null, images: {} })
 const TOAST_MS = 7000
@@ -26,6 +26,8 @@ function Workspace({ opened }: { opened: OpenedHistory }) {
   const [version, setVersion] = useState(0)
   const [query, setQuery] = useState('')
   const [threads, setThreads] = useState<ThreadMeta[]>([])
+  const [presets, setPresets] = useState<PromptPreset[]>([])
+  const [globalInstruction, setGlobalInstruction] = useState('')
   const [usage, setUsage] = useState<Usage>({ used: 0, limit: 1 })
   const [active, setActive] = useState<Active>(() => fresh(false))
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 768)
@@ -40,10 +42,12 @@ function Workspace({ opened }: { opened: OpenedHistory }) {
   useEffect(() => {
     let alive = true
     void (async () => {
-      const [list, u] = await Promise.all([query ? repo.search(query) : repo.list(), repo.usage()])
+      const [list, u, p, g] = await Promise.all([query ? repo.search(query) : repo.list(), repo.usage(), repo.listPresets(), repo.getGlobalInstruction()])
       if (alive) {
         setThreads(list)
         setUsage(u)
+        setPresets(p)
+        setGlobalInstruction(g)
       }
     })()
     return () => {
@@ -110,20 +114,27 @@ function Workspace({ opened }: { opened: OpenedHistory }) {
     })
   }
 
-  const removeAll = async () => {
+  const removeAll = async (alsoInstructions: boolean) => {
     await repo.clear()
+    if (alsoInstructions) {
+      for (const p of await repo.listPresets()) await repo.removePreset(p.id)
+      await repo.setGlobalInstruction('')
+    }
     setActive(fresh(false))
     setToast(null)
     refresh()
   }
 
-  const applyImport = async (incoming: { threads: Thread[]; images: StoredImage[] }, strategy: ImportStrategy) => {
+  const applyImport = async (incoming: { threads: Thread[]; images: StoredImage[]; presets: PromptPreset[]; globalInstruction: string }, strategy: ImportStrategy) => {
     setPendingImport(null)
     // A backend without image support (localStorage fallback) keeps the text and drops the images.
     const { threads: ts, images } = repo.supportsImages
       ? incoming
       : { threads: incoming.threads.map(th => ({ ...th, messages: th.messages.map(m => ({ ...m, images: undefined })) })), images: [] }
     await guarded(async () => {
+      for (const p of incoming.presets) await repo.savePreset(p)
+      // Only overwrite the local instruction when the backup actually had one set.
+      if (incoming.globalInstruction) await repo.setGlobalInstruction(incoming.globalInstruction)
       const r = await repo.importThreads(ts, images, strategy)
       notify({ message: t.importDone(r.added, r.merged, r.copied) })
     })
@@ -159,7 +170,7 @@ function Workspace({ opened }: { opened: OpenedHistory }) {
           onNew={() => setActive(fresh(false))}
           onTemp={() => setActive(fresh(true))}
           onDelete={ids => void remove(ids)}
-          onDeleteAll={() => void removeAll()}
+          onDeleteAll={alsoInstructions => void removeAll(alsoInstructions)}
           onPin={(id, pinned) => void guarded(() => repo.patch(id, { pinned }))}
           onRename={(id, title) => void guarded(() => repo.patch(id, { title }))}
           onExportThread={id =>
@@ -182,6 +193,8 @@ function Workspace({ opened }: { opened: OpenedHistory }) {
             initialImages={active.images}
             temporary={active.temporary}
             imagesEnabled={imageInput && repo.supportsImages}
+            presets={presets}
+            globalInstruction={globalInstruction}
             onSaved={refresh}
           />
         </main>

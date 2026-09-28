@@ -1,11 +1,11 @@
 // Export / import of history. Import files are untrusted input: everything is validated and
 // re-built field by field rather than trusted as-is.
 import { ALLOWED_IMAGE_TYPES, MAX_IMAGE_BYTES, base64ToBlob, blobToBase64 } from './images'
-import { imageIdsOf, type Draft, type DraftSet, type HistoryRepository, type StoredImage, type StoredMessage, type Thread } from './history'
+import { imageIdsOf, type Draft, type DraftSet, type HistoryRepository, type PromptPreset, type StoredImage, type StoredMessage, type Thread } from './history'
 
 const FORMAT = 'hitorigoto-export'
-/** v1: threads only. v2: adds draft sets and embedded images. */
-const FORMAT_VERSION = 2
+/** v1: threads only. v2: adds draft sets and embedded images. v3: adds presets, per-thread presetId, and the global instruction. */
+const FORMAT_VERSION = 3
 const MAX_TITLE = 200
 const MAX_TEXT = 1_000_000
 
@@ -18,15 +18,17 @@ export class ImportError extends Error {
 
 type ExportedImage = { type: string; data: string }
 
-/** Serializes every thread, embedding the images they reference as base64. */
+/** Serializes every thread, preset and the global instruction, embedding the threads' images as base64. */
 export async function exportAll(repo: HistoryRepository): Promise<string> {
   const threads = await repo.all()
+  const presets = await repo.listPresets()
+  const globalInstruction = await repo.getGlobalInstruction()
   const images: Record<string, ExportedImage> = {}
   for (const id of new Set(threads.flatMap(imageIdsOf))) {
     const blob = await repo.getImage(id)
     if (blob) images[id] = { type: blob.type, data: await blobToBase64(blob) }
   }
-  return JSON.stringify({ format: FORMAT, version: FORMAT_VERSION, exportedAt: new Date().toISOString(), threads, images }, null, 2)
+  return JSON.stringify({ format: FORMAT, version: FORMAT_VERSION, exportedAt: new Date().toISOString(), threads, images, presets, globalInstruction }, null, 2)
 }
 
 export function threadToMarkdown(thread: Thread, labels: { user: string; assistant: string; images: (n: number) => string }): string {
@@ -68,11 +70,18 @@ function parseThread(v: unknown, imageIds: Set<string>): Thread {
     title: v.title.slice(0, MAX_TITLE),
     titleEdited: v.titleEdited === true || undefined,
     pinned: v.pinned === true || undefined,
+    presetId: typeof v.presetId === 'string' ? v.presetId : undefined,
     createdAt: v.createdAt as number,
     updatedAt: v.updatedAt as number,
     messages: v.messages.map(m => parseMessage(m, imageIds)),
     draftSets: draftSets.length ? draftSets : undefined,
   }
+}
+
+function parsePreset(v: unknown): PromptPreset {
+  if (!isObject(v) || typeof v.id !== 'string' || !v.id || typeof v.name !== 'string' || typeof v.content !== 'string' || !finite(v.createdAt) || !finite(v.updatedAt))
+    throw new ImportError('invalid preset')
+  return { id: v.id, name: str(v.name, MAX_TITLE), content: str(v.content), createdAt: v.createdAt as number, updatedAt: v.updatedAt as number }
 }
 
 function parseImages(v: unknown): StoredImage[] {
@@ -91,15 +100,18 @@ function parseImages(v: unknown): StoredImage[] {
 }
 
 /** Parses the text of an exported JSON file. Throws ImportError if it is not a valid export. */
-export function parseImport(text: string): { threads: Thread[]; images: StoredImage[] } {
+export function parseImport(text: string): { threads: Thread[]; images: StoredImage[]; presets: PromptPreset[]; globalInstruction: string } {
   let data: unknown
   try {
     data = JSON.parse(text)
   } catch {
     throw new ImportError('not JSON')
   }
-  if (!isObject(data) || data.format !== FORMAT || (data.version !== 1 && data.version !== 2) || !Array.isArray(data.threads)) throw new ImportError('not a Hitorigoto export')
-  const images = data.version === 2 ? parseImages(data.images) : []
+  if (!isObject(data) || data.format !== FORMAT || ![1, 2, 3].includes(data.version as number) || !Array.isArray(data.threads)) throw new ImportError('not a Hitorigoto export')
+  const version = data.version as number
+  const images = version >= 2 ? parseImages(data.images) : []
   const ids = new Set(images.map(i => i.id))
-  return { threads: data.threads.map(t => parseThread(t, ids)), images }
+  const presets = version >= 3 && Array.isArray(data.presets) ? data.presets.map(parsePreset) : []
+  const globalInstruction = version >= 3 && data.globalInstruction !== undefined ? str(data.globalInstruction) : ''
+  return { threads: data.threads.map(t => parseThread(t, ids)), images, presets, globalInstruction }
 }

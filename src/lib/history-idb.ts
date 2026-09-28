@@ -1,7 +1,7 @@
-import { BaseHistoryRepository, HistoryQuotaError, toMeta, type Removed, type StoredImage, type Thread, type ThreadMeta, type Usage } from './history'
+import { BaseHistoryRepository, HistoryQuotaError, toMeta, type PromptPreset, type Removed, type StoredImage, type Thread, type ThreadMeta, type Usage } from './history'
 
 const DB_NAME = 'hitorigoto'
-const DB_VERSION = 1
+const DB_VERSION = 2
 const CHANNEL = 'hitorigoto-history'
 
 const req = <T>(r: IDBRequest<T>): Promise<T> =>
@@ -25,10 +25,11 @@ export function openDatabase(): Promise<IDBDatabase> {
     const open = indexedDB.open(DB_NAME, DB_VERSION)
     open.onupgradeneeded = () => {
       const db = open.result
-      db.createObjectStore('threads', { keyPath: 'id' })
-      db.createObjectStore('index', { keyPath: 'id' })
-      db.createObjectStore('images', { keyPath: 'id' })
-      db.createObjectStore('meta', { keyPath: 'key' })
+      if (!db.objectStoreNames.contains('threads')) db.createObjectStore('threads', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains('index')) db.createObjectStore('index', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains('images')) db.createObjectStore('images', { keyPath: 'id' })
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' })
+      if (!db.objectStoreNames.contains('presets')) db.createObjectStore('presets', { keyPath: 'id' })
     }
     open.onsuccess = () => resolve(open.result)
     open.onerror = () => reject(open.error)
@@ -138,6 +139,47 @@ export class IndexedDbHistoryRepository extends BaseHistoryRepository {
   async getImage(id: string) {
     const image = (await req(this.db.transaction('images').objectStore('images').get(id))) as StoredImage | undefined
     return image?.blob ?? null
+  }
+
+  async listPresets(): Promise<PromptPreset[]> {
+    const rows = (await req(this.db.transaction('presets').objectStore('presets').getAll())) as PromptPreset[]
+    return rows.sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  async savePreset(preset: PromptPreset) {
+    try {
+      const tx = this.db.transaction('presets', 'readwrite')
+      tx.objectStore('presets').put(preset)
+      await finished(tx)
+    } catch (e) {
+      throw mapError(e)
+    }
+    this.notify()
+  }
+
+  async removePreset(id: string) {
+    const tx = this.db.transaction('presets', 'readwrite')
+    tx.objectStore('presets').delete(id)
+    await finished(tx)
+    this.notify()
+  }
+
+  async getGlobalInstruction(): Promise<string> {
+    const row = (await req(this.db.transaction('meta').objectStore('meta').get('globalInstruction'))) as { value: string } | undefined
+    return row?.value ?? ''
+  }
+
+  async setGlobalInstruction(content: string) {
+    const trimmed = content.trim()
+    try {
+      const tx = this.db.transaction('meta', 'readwrite')
+      if (trimmed) tx.objectStore('meta').put({ key: 'globalInstruction', value: trimmed })
+      else tx.objectStore('meta').delete('globalInstruction')
+      await finished(tx)
+    } catch (e) {
+      throw mapError(e)
+    }
+    this.notify()
   }
 
   async getFlag(key: string): Promise<boolean> {

@@ -1,7 +1,7 @@
 import type { ThreadMessage } from '@assistant-ui/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MetricsStore } from './metrics'
-import { NanoSessions, SUMMARY_PROMPT } from './nano'
+import { NanoSessions, SUMMARY_PROMPT, SYSTEM_PROMPT } from './nano'
 
 type Att = { content: { type: 'image'; image: string }[] }
 const msg = (id: string, role: 'user' | 'assistant', text: string, attachments?: Att[]) =>
@@ -101,6 +101,85 @@ describe('session cache', () => {
     const s = new NanoSessions('ja')
     await run(s, [msg('u1', 'user', 'hi')])
     expect(s.getState()).toEqual({ phase: 'idle', used: 250, quota: 1000, error: null })
+  })
+})
+
+describe('custom instructions (preset)', () => {
+  it('appends the preset content to the base system prompt', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setPreset('関西弁で話す')
+    await run(s, [msg('u1', 'user', 'hi')])
+    const system = m.chats()[0].options.initialPrompts![0].content as string
+    expect(system).toContain(SYSTEM_PROMPT.ja)
+    expect(system).toContain('関西弁で話す')
+  })
+
+  it('omits the preset section entirely when none is set', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    await run(s, [msg('u1', 'user', 'hi')])
+    expect(m.chats()[0].options.initialPrompts![0].content).toBe(SYSTEM_PROMPT.ja)
+  })
+
+  it('rebuilds the session when the preset changes', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    await run(s, [msg('u1', 'user', 'hi')])
+    s.setPreset('be a pirate')
+    await run(s, [msg('u1', 'user', 'hi'), msg('a1', 'assistant', 'ok'), msg('u2', 'user', 'again')])
+    expect(m.sessions).toHaveLength(2)
+    expect(m.sessions[0].destroyed).toBe(true)
+  })
+
+  it('setting the same preset again does not rebuild the cached session', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setPreset('be a pirate')
+    await run(s, [msg('u1', 'user', 'hi')])
+    s.setPreset('be a pirate')
+    s.setPreset(' be a pirate ') // trimmed to the same value
+    await run(s, [msg('u1', 'user', 'hi'), msg('a1', 'assistant', 'ok'), msg('u2', 'user', 'again')])
+    expect(m.sessions).toHaveLength(1)
+  })
+
+  it('an empty or whitespace-only preset is treated as "no preset"', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setPreset('   ')
+    await run(s, [msg('u1', 'user', 'hi')])
+    expect(m.chats()[0].options.initialPrompts![0].content).toBe(SYSTEM_PROMPT.ja)
+  })
+})
+
+describe('always-on global instruction', () => {
+  it('applies regardless of the selected preset, ordered before it', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setGlobalInstruction('be terse')
+    s.setPreset('be a pirate')
+    await run(s, [msg('u1', 'user', 'hi')])
+    const system = m.chats()[0].options.initialPrompts![0].content as string
+    expect(system).toBe(`${SYSTEM_PROMPT.ja}\n\nbe terse\n\nbe a pirate`)
+  })
+
+  it('applies even with no preset selected', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setGlobalInstruction('be terse')
+    await run(s, [msg('u1', 'user', 'hi')])
+    expect(m.chats()[0].options.initialPrompts![0].content).toBe(`${SYSTEM_PROMPT.ja}\n\nbe terse`)
+  })
+
+  it('rebuilds the session when it changes, and a blank value clears it', async () => {
+    const m = installModel()
+    const s = new NanoSessions('ja')
+    s.setGlobalInstruction('be terse')
+    await run(s, [msg('u1', 'user', 'hi')])
+    s.setGlobalInstruction('  ')
+    await run(s, [msg('u1', 'user', 'hi'), msg('a1', 'assistant', 'ok'), msg('u2', 'user', 'again')])
+    expect(m.sessions).toHaveLength(2)
+    expect(m.chats()[1].options.initialPrompts![0].content).toBe(SYSTEM_PROMPT.ja)
   })
 })
 

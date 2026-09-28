@@ -15,6 +15,9 @@ export async function migrateFromLocalStorage(target: IndexedDbHistoryRepository
     const threads = await legacy.all()
     for (const t of threads) await target.save(t)
     for (const t of threads) if (!(await target.get(t.id))) throw new Error(`verification failed for ${t.id}`)
+    for (const p of await legacy.listPresets()) await target.savePreset(p)
+    const globalInstruction = await legacy.getGlobalInstruction()
+    if (globalInstruction) await target.setGlobalInstruction(globalInstruction)
     await target.setFlag(MIGRATED_FLAG)
     await legacy.clear()
     return { migrated: threads.length }

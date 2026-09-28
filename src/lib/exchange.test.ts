@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ImportError, exportAll, parseImport, threadToMarkdown } from './exchange'
-import type { HistoryRepository, Thread } from './history'
+import type { HistoryRepository, PromptPreset, Thread } from './history'
 
 const msg = (id: string, role: 'user' | 'assistant', text: string, images?: string[]) => ({ id, role, text, createdAt: 1, images })
 const thread = (id: string, over: Partial<Thread> = {}): Thread => ({
@@ -11,17 +11,17 @@ const thread = (id: string, over: Partial<Thread> = {}): Thread => ({
   messages: [msg(`${id}-1`, 'user', `hello ${id}`), msg(`${id}-2`, 'assistant', `reply ${id}`)],
   ...over,
 })
+const preset = (id: string, over: Partial<PromptPreset> = {}): PromptPreset => ({ id, name: `name ${id}`, content: `content ${id}`, createdAt: 1, updatedAt: 1, ...over })
+const fakeRepo = (over: Partial<HistoryRepository> = {}): HistoryRepository =>
+  ({ all: async () => [], getImage: async () => null, listPresets: async () => [], getGlobalInstruction: async () => '', ...over }) as unknown as HistoryRepository
 
-const file = (over: Record<string, unknown>) => JSON.stringify({ format: 'hitorigoto-export', version: 2, threads: [], images: {}, ...over })
+const file = (over: Record<string, unknown>) => JSON.stringify({ format: 'hitorigoto-export', version: 3, threads: [], images: {}, presets: [], ...over })
 const PNG_B64 = btoa('png-bytes')
 
 describe('export / import round trip', () => {
   it('embeds referenced images and restores them, dropping references to missing ones', async () => {
     const t = thread('a', { messages: [msg('m1', 'user', 'look', ['img1', 'gone'])], draftSets: [{ id: 's', prompt: 'p', createdAt: 3, drafts: [{ temperature: 0.2, text: 'x' }] }] })
-    const repo = {
-      all: async () => [t],
-      getImage: async (id: string) => (id === 'img1' ? new Blob(['png-bytes'], { type: 'image/png' }) : null),
-    } as unknown as HistoryRepository
+    const repo = fakeRepo({ all: async () => [t], getImage: async (id: string) => (id === 'img1' ? new Blob(['png-bytes'], { type: 'image/png' }) : null) })
 
     const parsed = parseImport(await exportAll(repo))
     expect(parsed.images.map(i => i.id)).toEqual(['img1'])
@@ -30,9 +30,33 @@ describe('export / import round trip', () => {
     expect(parsed.threads[0].draftSets).toEqual(t.draftSets)
   })
 
+  it('embeds presets and restores a thread’s presetId', async () => {
+    const t = thread('a', { presetId: 'p1' })
+    const repo = fakeRepo({ all: async () => [t], listPresets: async () => [preset('p1')] })
+
+    const parsed = parseImport(await exportAll(repo))
+    expect(parsed.presets).toEqual([preset('p1')])
+    expect(parsed.threads[0].presetId).toBe('p1')
+  })
+
+  it('embeds the global instruction', async () => {
+    const repo = fakeRepo({ getGlobalInstruction: async () => 'be terse' })
+    expect(parseImport(await exportAll(repo)).globalInstruction).toBe('be terse')
+  })
+
   it('still accepts version 1 files (threads only)', () => {
     const v1 = JSON.stringify({ format: 'hitorigoto-export', version: 1, threads: [thread('a')] })
-    expect(parseImport(v1).threads).toHaveLength(1)
+    const parsed = parseImport(v1)
+    expect(parsed.threads).toHaveLength(1)
+    expect(parsed.presets).toEqual([])
+    expect(parsed.globalInstruction).toBe('')
+  })
+
+  it('still accepts version 2 files (no presets or global instruction field)', () => {
+    const v2 = JSON.stringify({ format: 'hitorigoto-export', version: 2, threads: [thread('a')], images: {} })
+    const parsed = parseImport(v2)
+    expect(parsed.presets).toEqual([])
+    expect(parsed.globalInstruction).toBe('')
   })
 })
 
@@ -47,6 +71,8 @@ describe('import validation', () => {
     ['image with a disallowed type', file({ images: { i: { type: 'image/svg+xml', data: PNG_B64 } } })],
     ['image that is not base64', file({ images: { i: { type: 'image/png', data: '***' } } })],
     ['oversized image', file({ images: { i: { type: 'image/png', data: 'A'.repeat(15_000_000) } } })],
+    ['bad preset', file({ presets: [{ id: 'p' }] })],
+    ['non-string global instruction', file({ globalInstruction: 42 })],
   ])('rejects %s', (_name, text) => {
     expect(() => parseImport(text)).toThrow(ImportError)
   })

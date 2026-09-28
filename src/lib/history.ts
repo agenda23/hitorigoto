@@ -19,6 +19,8 @@ export type Thread = {
   /** True once the user renamed the thread: auto-titling must not overwrite it. */
   titleEdited?: boolean
   pinned?: boolean
+  /** The prompt preset selected for this thread, if any (see PromptPreset). */
+  presetId?: string
   createdAt: number
   updatedAt: number
   messages: StoredMessage[]
@@ -34,6 +36,8 @@ export type ThreadMeta = {
   imageIds?: string[]
 }
 export type StoredImage = { id: string; blob: Blob }
+/** A saved system-prompt preset (persona / tone / rules given to the model up front). */
+export type PromptPreset = { id: string; name: string; content: string; createdAt: number; updatedAt: number }
 /** Everything removed by `remove`, so the caller can offer "undo". */
 export type Removed = { threads: Thread[]; images: StoredImage[] }
 export type ImportStrategy = 'merge' | 'copy'
@@ -68,6 +72,13 @@ export interface HistoryRepository {
   /** Adds a draft set to a thread, creating a thread for it if needed. */
   addDraftSet(threadId: string, set: DraftSet, fallbackTitle: string): Promise<void>
   removeDraftSet(threadId: string, setId: string): Promise<void>
+  listPresets(): Promise<PromptPreset[]>
+  savePreset(preset: PromptPreset): Promise<void>
+  removePreset(id: string): Promise<void>
+  /** The single always-on instruction, applied to every conversation. '' when unset. */
+  getGlobalInstruction(): Promise<string>
+  /** An empty string clears it. */
+  setGlobalInstruction(content: string): Promise<void>
   subscribe(onChange: () => void): () => void
 }
 
@@ -98,6 +109,11 @@ export abstract class BaseHistoryRepository implements HistoryRepository {
   abstract usage(): Promise<Usage>
   abstract putImage(image: StoredImage): Promise<void>
   abstract getImage(id: string): Promise<Blob | null>
+  abstract listPresets(): Promise<PromptPreset[]>
+  abstract savePreset(preset: PromptPreset): Promise<void>
+  abstract removePreset(id: string): Promise<void>
+  abstract getGlobalInstruction(): Promise<string>
+  abstract setGlobalInstruction(content: string): Promise<void>
   abstract subscribe(onChange: () => void): () => void
 
   async patch(id: string, changes: { title?: string; pinned?: boolean }) {
@@ -182,7 +198,8 @@ export abstract class BaseHistoryRepository implements HistoryRepository {
 }
 
 const PREFIX = 'hitorigoto:'
-const KEEP_ON_CLEAR = [PREFIX + 'lang', PREFIX + 'onboarded']
+// Presets and the global instruction are settings, not "history": "delete all history" must not wipe them.
+const KEEP_ON_CLEAR = [PREFIX + 'lang', PREFIX + 'onboarded', PREFIX + 'presets', PREFIX + 'globalInstruction']
 const SCHEMA_VERSION = 1
 /** Chrome allows about 5 MiB of UTF-16 code units per origin. */
 export const STORAGE_LIMIT = 5 * 1024 * 1024
@@ -212,7 +229,42 @@ export class LocalStorageHistoryRepository extends BaseHistoryRepository {
 
   /** True when there is legacy history to migrate. */
   hasData() {
-    return localStorage.getItem(PREFIX + 'index') !== null
+    return (
+      localStorage.getItem(PREFIX + 'index') !== null ||
+      localStorage.getItem(PREFIX + 'presets') !== null ||
+      localStorage.getItem(PREFIX + 'globalInstruction') !== null
+    )
+  }
+
+  private readPresets(): PromptPreset[] {
+    try {
+      const raw = localStorage.getItem(PREFIX + 'presets')
+      return raw ? (JSON.parse(raw) as PromptPreset[]) : []
+    } catch {
+      return []
+    }
+  }
+
+  async listPresets() {
+    return this.readPresets().sort((a, b) => b.updatedAt - a.updatedAt)
+  }
+
+  async savePreset(preset: PromptPreset) {
+    this.write('presets', JSON.stringify([...this.readPresets().filter(p => p.id !== preset.id), preset]))
+  }
+
+  async removePreset(id: string) {
+    this.write('presets', JSON.stringify(this.readPresets().filter(p => p.id !== id)))
+  }
+
+  async getGlobalInstruction() {
+    return localStorage.getItem(PREFIX + 'globalInstruction') ?? ''
+  }
+
+  async setGlobalInstruction(content: string) {
+    const trimmed = content.trim()
+    if (trimmed) this.write('globalInstruction', trimmed)
+    else localStorage.removeItem(PREFIX + 'globalInstruction')
   }
 
   async list() {

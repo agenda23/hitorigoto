@@ -85,6 +85,10 @@ export class NanoSessions {
   private overflowed = false
   /** Covers every message up to and including `upToId`. Valid only while that message is still in the history. */
   private summary: { text: string; upToId: string } | null = null
+  /** Custom instructions (persona/tone/rules), appended to the base system prompt. */
+  private preset: string | null = null
+  /** Always-on instructions, applied regardless of the selected preset. */
+  private globalInstruction: string | null = null
   private state: SessionState = { phase: 'idle', used: 0, quota: 0, error: null }
   private listeners = new Set<() => void>()
 
@@ -125,6 +129,22 @@ export class NanoSessions {
     this.destroy()
   }
 
+  /** Changes the custom instructions prepended to the system prompt. Keeps any existing summary. */
+  setPreset(content: string | null) {
+    const next = content?.trim() || null
+    if (next === this.preset) return
+    this.preset = next
+    this.destroy()
+  }
+
+  /** Changes the always-on instructions. Keeps any existing summary. */
+  setGlobalInstruction(content: string | null) {
+    const next = content?.trim() || null
+    if (next === this.globalInstruction) return
+    this.globalInstruction = next
+    this.destroy()
+  }
+
   private create(options: Omit<LMCreateOptions, 'expectedInputs' | 'expectedOutputs'>) {
     if (typeof LanguageModel === 'undefined') throw new Error('LanguageModel is not available')
     return LanguageModel.create({ ...sessionOptions(this.lang, this.images), ...options })
@@ -142,8 +162,11 @@ export class NanoSessions {
 
   private async build(history: readonly ThreadMessage[], signal?: AbortSignal): Promise<Cached> {
     const recent = this.recentAfterSummary(history)
-    const system = this.summary ? `${SYSTEM_PROMPT[this.lang]}\n\n${SUMMARY_INTRO[this.lang]}\n${this.summary.text}` : SYSTEM_PROMPT[this.lang]
-    const session = await this.create({ initialPrompts: [{ role: 'system', content: system }, ...toPrompts(recent, this.lang)], signal })
+    const parts = [SYSTEM_PROMPT[this.lang]]
+    if (this.globalInstruction) parts.push(this.globalInstruction)
+    if (this.preset) parts.push(this.preset)
+    if (this.summary) parts.push(`${SUMMARY_INTRO[this.lang]}\n${this.summary.text}`)
+    const session = await this.create({ initialPrompts: [{ role: 'system', content: parts.join('\n\n') }, ...toPrompts(recent, this.lang)], signal })
     session.oncontextoverflow = () => {
       this.overflowed = true
     }
