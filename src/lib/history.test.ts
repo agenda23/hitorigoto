@@ -111,6 +111,28 @@ describe.each(backends)('%s repository', (_name, make) => {
     expect((await repo.get('new'))!.draftSets).toBeUndefined()
   })
 
+  it('global instruction: unset is an empty string, set/get/clear', async () => {
+    expect(await repo.getGlobalInstruction()).toBe('')
+    await repo.setGlobalInstruction('  be terse  ')
+    expect(await repo.getGlobalInstruction()).toBe('be terse')
+    await repo.setGlobalInstruction('')
+    expect(await repo.getGlobalInstruction()).toBe('')
+  })
+
+  it('presets: save, list newest first, remove', async () => {
+    await repo.savePreset({ id: 'p1', name: 'first', content: 'be concise', createdAt: 1, updatedAt: 1 })
+    await repo.savePreset({ id: 'p2', name: 'second', content: 'be verbose', createdAt: 2, updatedAt: 2 })
+    expect((await repo.listPresets()).map(p => p.id)).toEqual(['p2', 'p1'])
+
+    await repo.savePreset({ id: 'p1', name: 'first (edited)', content: 'be concise', createdAt: 1, updatedAt: 3 })
+    const list = await repo.listPresets()
+    expect(list.map(p => p.id)).toEqual(['p1', 'p2'])
+    expect(list[0].name).toBe('first (edited)')
+
+    await repo.removePreset('p2')
+    expect((await repo.listPresets()).map(p => p.id)).toEqual(['p1'])
+  })
+
   describe('import strategies', () => {
     it('adds new threads', async () => {
       expect(await repo.importThreads([thread('a')], [], 'merge')).toEqual({ added: 1, merged: 0, copied: 0 })
@@ -148,14 +170,18 @@ describe('localStorage repository specifics', () => {
     expect(after).toBeLessThan(1000)
   })
 
-  it('clear keeps the language and onboarding preferences only', async () => {
+  it('clear keeps the language, onboarding, presets and global instruction settings only', async () => {
     const repo = new LocalStorageHistoryRepository()
     localStorage.setItem('hitorigoto:lang', 'en')
     localStorage.setItem('hitorigoto:onboarded', '1')
     localStorage.setItem('unrelated', 'x')
     await repo.save(thread('a'))
+    await repo.savePreset({ id: 'p1', name: 'persona', content: 'be nice', createdAt: 1, updatedAt: 1 })
+    await repo.setGlobalInstruction('be terse')
     await repo.clear()
-    expect(Object.keys(localStorage).sort()).toEqual(['hitorigoto:lang', 'hitorigoto:onboarded', 'unrelated'])
+    expect(Object.keys(localStorage).sort()).toEqual(['hitorigoto:globalInstruction', 'hitorigoto:lang', 'hitorigoto:onboarded', 'hitorigoto:presets', 'unrelated'])
+    expect(await repo.listPresets()).toHaveLength(1)
+    expect(await repo.getGlobalInstruction()).toBe('be terse')
   })
 
   it('throws HistoryQuotaError and leaves storage consistent', async () => {
@@ -219,17 +245,20 @@ describe('migration from localStorage', () => {
     const legacy = new LocalStorageHistoryRepository()
     await legacy.save(thread('a', { pinned: true }))
     await legacy.save(thread('b'))
+    await legacy.savePreset({ id: 'p1', name: 'persona', content: 'be nice', createdAt: 1, updatedAt: 1 })
+    await legacy.setGlobalInstruction('be terse')
     return legacy
   }
   const target = async () => (await backends[1][1]()) as IndexedDbHistoryRepository
 
-  it('copies threads, sets the flag and clears localStorage', async () => {
+  it('copies threads, presets and the global instruction, sets the flag and clears localStorage', async () => {
     const legacy = await seed()
     const idb = await target()
     expect(await migrateFromLocalStorage(idb, legacy)).toEqual({ migrated: 2 })
     expect((await idb.list()).map(m => m.id).sort()).toEqual(['a', 'b'])
     expect((await idb.get('a'))!.pinned).toBe(true)
-    expect(legacy.hasData()).toBe(false)
+    expect((await idb.listPresets()).map(p => p.id)).toEqual(['p1'])
+    expect(await idb.getGlobalInstruction()).toBe('be terse')
     expect(await idb.getFlag('migratedFromLocalStorage')).toBe(true)
   })
 

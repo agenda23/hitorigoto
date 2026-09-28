@@ -17,7 +17,8 @@ export type SidebarProps = {
   onNew: () => void
   onTemp: () => void
   onDelete: (ids: string[]) => void
-  onDeleteAll: () => void
+  /** True when the presets and the always-on instruction should be deleted too (the user's choice, asked at delete time). */
+  onDeleteAll: (alsoInstructions: boolean) => void
   onPin: (id: string, pinned: boolean) => void
   onRename: (id: string, title: string) => void
   onExportThread: (id: string) => void
@@ -89,6 +90,7 @@ export function Sidebar(p: SidebarProps) {
   const { t } = useI18n()
   const guide = useGuide()
   const [confirmAll, setConfirmAll] = useState(false)
+  const [deleteInstructionsToo, setDeleteInstructionsToo] = useState(false)
   const [menuId, setMenuId] = useState<string | null>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [selecting, setSelecting] = useState(false)
@@ -282,18 +284,30 @@ export function Sidebar(p: SidebarProps) {
         {confirmAll ? (
           <div className="space-y-2 rounded-lg border border-danger/40 p-3" role="alertdialog" aria-label={t.deleteAll}>
             <p className="text-xs">{t.deleteAllConfirm}</p>
+            <label className="flex items-start gap-2 text-xs">
+              <input type="checkbox" className="mt-0.5" checked={deleteInstructionsToo} onChange={e => setDeleteInstructionsToo(e.target.checked)} />
+              <span>{t.deleteAllIncludeInstructions}</span>
+            </label>
             <div className="flex gap-2">
               <button
                 type="button"
                 className="rounded-lg bg-danger px-3 py-1.5 text-xs text-background"
                 onClick={() => {
                   setConfirmAll(false)
-                  p.onDeleteAll()
+                  p.onDeleteAll(deleteInstructionsToo)
+                  setDeleteInstructionsToo(false)
                 }}
               >
                 {t.confirmYes}
               </button>
-              <button type="button" className="rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-foreground/5" onClick={() => setConfirmAll(false)}>
+              <button
+                type="button"
+                className="rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-foreground/5"
+                onClick={() => {
+                  setConfirmAll(false)
+                  setDeleteInstructionsToo(false)
+                }}
+              >
                 {t.confirmNo}
               </button>
             </div>

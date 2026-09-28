@@ -13,7 +13,7 @@ import {
   type ThreadMessageLike,
 } from '@assistant-ui/react'
 import { Streamdown } from 'streamdown'
-import { HistoryQuotaError, type DraftSet, type StoredMessage, type Thread } from '../lib/history'
+import { HistoryQuotaError, type DraftSet, type PromptPreset, type StoredMessage, type Thread } from '../lib/history'
 import { useHistory } from '../lib/history-context'
 import { useI18n } from '../lib/i18n'
 import { MAX_IMAGE_BYTES, blobToDataUrl, dataUrlToBlob } from '../lib/images'
@@ -315,14 +315,25 @@ type Props = {
   temporary: boolean
   /** Whether the model accepts image input (and the storage can keep images). */
   imagesEnabled: boolean
+  /** Saved system-prompt presets, selectable for this thread. */
+  presets: PromptPreset[]
+  /** Always-on instructions, applied regardless of the selected preset ('' when unset). */
+  globalInstruction: string
   onSaved: () => void
 }
 
-export function Chat({ threadId, initial, initialImages, temporary, imagesEnabled, onSaved }: Props) {
+export function Chat({ threadId, initial, initialImages, temporary, imagesEnabled, presets, globalInstruction, onSaved }: Props) {
   const { t, lang } = useI18n()
   const repo = useHistory()
   const [notice, setNotice] = useState<'save' | 'image' | null>(null)
   const [draftSets, setDraftSets] = useState<DraftSet[]>(initial?.draftSets ?? [])
+  const [presetId, setPresetId] = useState<string | null>(initial?.presetId ?? null)
+  // A preset can be deleted elsewhere while this thread has it selected: fall back to "none".
+  const activePresetId = presets.some(p => p.id === presetId) ? presetId : null
+  const activePresetContent = presets.find(p => p.id === activePresetId)?.content ?? null
+  // Read from the save() closure below without re-subscribing on every preset change.
+  const presetIdRef = useRef(activePresetId)
+  presetIdRef.current = activePresetId
   const sessions = useMemo(() => new NanoSessions(lang, imagesEnabled), []) // eslint-disable-line react-hooks/exhaustive-deps
   const session = useSyncExternalStore(sessions.subscribe, sessions.getState)
   const initialMessages = useMemo(() => toInitial(initial, initialImages), [initial, initialImages])
@@ -341,6 +352,14 @@ export function Chat({ threadId, initial, initialImages, temporary, imagesEnable
   useEffect(() => {
     sessions.setLang(lang)
   }, [sessions, lang])
+
+  useEffect(() => {
+    sessions.setPreset(activePresetContent)
+  }, [sessions, activePresetContent])
+
+  useEffect(() => {
+    sessions.setGlobalInstruction(globalInstruction)
+  }, [sessions, globalInstruction])
 
   useEffect(() => {
     if (!initial) void sessions.warmup()
@@ -384,6 +403,7 @@ export function Chat({ threadId, initial, initialImages, temporary, imagesEnable
         title: existing?.titleEdited ? existing.title : firstUser.slice(0, TITLE_MAX) || t.untitled,
         titleEdited: existing?.titleEdited,
         pinned: existing?.pinned,
+        presetId: presetIdRef.current ?? undefined,
         createdAt: existing?.createdAt ?? initial?.createdAt ?? messages[0].createdAt,
         updatedAt: Date.now(),
         messages,
@@ -437,6 +457,23 @@ export function Chat({ threadId, initial, initialImages, temporary, imagesEnable
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ThreadPrimitive.Root className="flex h-full flex-col">
+        {presets.length > 0 && (
+          <div className="mx-auto flex w-full max-w-3xl items-center justify-end gap-1.5 px-4 pt-2 text-xs text-muted-foreground">
+            <label className="flex items-center gap-1.5">
+              <span>{t.presetActiveLabel}</span>
+              <select
+                className="rounded-lg border border-border bg-transparent px-2 py-1 text-foreground"
+                value={activePresetId ?? ''}
+                onChange={e => setPresetId(e.target.value || null)}
+              >
+                <option value="">{t.presetsNone}</option>
+                {presets.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
         <ThreadPrimitive.Viewport className="flex-1 overflow-y-auto">
           <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-6 px-4 py-8">
             <ThreadPrimitive.Empty>

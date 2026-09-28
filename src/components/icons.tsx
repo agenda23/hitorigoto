@@ -120,3 +120,9 @@ export const ActivityIcon = () => (
     <path d="M3 12h4l3-8 4 16 3-8h4" />
   </Icon>
 )
+export const PersonaIcon = () => (
+  <Icon size={16}>
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 20c0-4 3.5-7 8-7s8 3 8 7" />
+  </Icon>
+)
